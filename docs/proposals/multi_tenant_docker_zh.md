@@ -23,6 +23,29 @@ curl -s localhost:2333/search -H 'Content-Type: application/json' -H 'X-Reme-Ten
 
 `version` / `health_check` / `help` 是运维端点,豁免认证(无需租户头)。
 
+## 向量检索(embedding,可选)
+
+默认检索是 **BM25 + wikilink**,不调用任何 embedding 服务——这是 ReMe 的默认哲学(开箱不强制
+依赖向量模型),也是为什么裸 BM25 部署 `.env` 里那两个 `EMBEDDING_*` 用不上。要开启向量化:
+
+1. 在 `.env` 里设 `REME_EMBEDDING_STORE=default`,并填好 `EMBEDDING_API_KEY`(及需要时的
+   `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL_NAME`);
+2. `docker compose up -d`(无需改配置文件或重建镜像——开关是环境变量)。
+
+开启后:
+
+- **embedding 客户端(`as_embedding`)是全局共享**的(无状态推理客户端,一份即可);
+- **每个租户有自己独立的向量索引(`embedding_store`)**,存在该租户 workspace 的 `metadata/`
+  下,与其它租户完全隔离;
+- 写入时对新 chunk 同步向量化;检索走 **向量 + BM25 的 RRF 融合**,再按 wikilink 扩展;
+- embedding 服务不可达时会自动降级为 BM25(不阻断写入/检索),已验证。
+
+关闭时(默认,`REME_EMBEDDING_STORE` 为空):`file_store` 不绑定 embedding_store,不产生任何
+embedding 调用。
+
+> 已验证:开关关闭且完全不配 `EMBEDDING_*` 时服务正常启动、写入、检索(纯 BM25);开关打开时
+> `as_embedding` 全局共享、各租户 `embedding_store` 互相独立、`file_store` 绑定到本租户的向量库。
+
 ## 关键设计
 
 - **数据即文件,必须挂卷**:租户 workspace 在容器内 `/data/tenants/<tenant>/`,compose 把

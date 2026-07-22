@@ -23,5 +23,9 @@ services:
       REME_WORKSPACES_ROOT: /data/tenants
       REME_HOST: 0.0.0.0
       REME_PORT: "2333"
+      # Vector search is OFF by default (BM25 + wikilink). To enable, uncomment
+      # the next line and set EMBEDDING_API_KEY in .env. The embedding client is
+      # shared; each tenant keeps its own vector index under its workspace.
+      # REME_EMBEDDING_STORE: default
     volumes:
       - ./tenant-data:/data
