@@ -1,0 +1,29 @@
+# VCS / CI
+.git
+.github
+.gitignore
+
+# Docs and non-runtime assets
+docs
+benchmark
+tests
+plugins
+skills
+*.md
+!README.md
+
+# Local dev / caches / data
+.reme
+.reme_tenants
+tenant-data
+.venv
+venv
+env
+__pycache__
+*.pyc
+.pytest_cache
+.pre-commit-config.yaml
+
+# Secrets / local env
+.env
+example.env

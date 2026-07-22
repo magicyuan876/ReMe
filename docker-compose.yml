@@ -1,0 +1,27 @@
+# ReMe multi-tenant memory service.
+#
+#   cp example.env .env      # set LLM_API_KEY / LLM_BASE_URL
+#   docker compose up -d --build
+#
+# Tenant memory persists in the ./tenant-data host directory (one subdir per
+# tenant). Calls must carry an X-Reme-Tenant header:
+#   curl -s localhost:2333/search -H 'Content-Type: application/json' \
+#        -H 'X-Reme-Tenant: alice' -d '{"query":"...", "limit":5}'
+#
+# SECURITY: trusted_header trusts whoever sets X-Reme-Tenant. Keep this port on a
+# private network behind your authenticated backend/gateway; do not expose it raw.
+services:
+  reme:
+    build: .
+    image: reme-multitenant:latest
+    restart: unless-stopped
+    ports:
+      - "2333:2333"
+    env_file:
+      - .env
+    environment:
+      REME_WORKSPACES_ROOT: /data/tenants
+      REME_HOST: 0.0.0.0
+      REME_PORT: "2333"
+    volumes:
+      - ./tenant-data:/data
