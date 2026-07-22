@@ -3,7 +3,7 @@
 - 状态:内部评审稿(未发布)
 - 关联:[原生多租户 Workspace 提案](multi_tenant_workspaces_zh.md) · [agentscope-ai/ReMe #368](https://github.com/agentscope-ai/ReMe/issues/368)
 - 目标:让 agentscope-java(2.x)把改造后的多租户 ReMe(v4)作为长期记忆后端,支持约 5000 用户。
-- 范围:定义两侧的操作映射、身份/会话对齐、增量与巩固语义、错误与降级。不含模型凭据/计费(宿主职责)。
+- 范围:定义两侧的操作映射、身份/会话对齐、增量与巩固语义、错误与降级。不含模型凭据/计费(运营方职责)。
 
 ---
 
@@ -40,9 +40,8 @@ Mono<String> retrieve(Msg msg);        // reasoning 前由框架调用,返回注
 | 端点 | 用途 |
 |---|---|
 | `POST /search` | 混合检索,返回 `answer` + `metadata.results` |
-| `POST /session_append` | 【新增,M8a】按 session_id 追加对话增量,不调 LLM |
-| `POST /auto_memory` | LLM 蒸馏对话增量为 daily 卡片 |
-| `POST /auto_dream` | 巩固 daily → digest(长期层) |
+| `POST /auto_memory` | 落盘会话 + LLM 蒸馏为 daily 卡片(内部已分捕获/蒸馏两段) |
+| `POST /auto_dream` | 巩固 daily → digest(长期层);常规由 ReMe 侧调度器触发 |
 | `POST /proactive` | 读取兴趣话题 |
 
 ---
@@ -63,47 +62,35 @@ X-Reme-Tenant: <userId>
   workspace 加载尖峰 → 见 §5 会话预热。
 - 检索层次可选:长期记忆召回建议偏 `digest`(通过 search 的过滤/权重,或专用范围参数)。
 
-### 3.2 `record(List<Msg>)` → 拆为"捕获 + 延迟蒸馏"(核心对齐)
+### 3.2 `record(List<Msg>)` → `POST /auto_memory`(沿用现有 job)
 
-**不要**把 `record` 直接映射到 `auto_memory`。原因:`auto_memory` 每次调用都是一次
-`agent_wrapper.reply` 的 LLM 蒸馏,若每回合触发且传全量历史,成本随会话长度二次增长。对齐为:
+直接映射到现有 `auto_memory`,**不新增 job**。`auto_memory` 内部本就分两段:先廉价落盘会话
+(`_save_session_messages`),再由 `agent_wrapper.reply` 蒸馏为 daily 卡片,并按 (day, session_id)
+合并到同一张笔记——这已是 ReMe 的成熟设计,适配器不另造捕获/蒸馏机制。
 
-**每回合(record 调用时)—— 只做廉价捕获:**
-```
-POST /session_append
-X-Reme-Tenant: <userId>
-{"session_id": "<sessionId>", "messages": [<本回合增量,{role,content}>]}
-```
-- 适配器只传**自上次 record 以来的增量**(见 §4 增量语义),不调 LLM,延迟可忽略。
-
-**会话结束 / 定时 —— 蒸馏为 daily:**
 ```
 POST /auto_memory
 X-Reme-Tenant: <userId>
-{"session_id": "<sessionId>"}      # 读取该 session 自上次蒸馏以来的增量
+{"session_id": "<sessionId>", "messages": [<本回合增量,{role,content}>]}
 ```
-- 触发时机:agentscope 会话关闭钩子,或宿主定时批处理。
 
-> 若初期想最简实现,可让 `record` 直接调 `auto_memory` 且只传增量——但要接受每回合一次
-> LLM 蒸馏的成本;规模化前应切到拆分方案。
+- 租户 = `ctx.getUserId()`;会话 = `ctx.getSessionId()`。
+- **调用节奏是适配器的选择,不改 ReMe**:`auto_memory` 每次调用会跑一次蒸馏,故适配器应传
+  **本回合增量**而非全量历史(见 §4);若要压低蒸馏频次,可选择在会话结束时调用而非每回合。
+- 增量/去重语义沿用 `auto_memory` / `auto_memory_cc` 的现有行为,不在适配器侧另造。
 
-### 3.3 巩固 `auto_dream`(digest 长期层——SPI 没有的钩子)
+### 3.3 巩固 `auto_dream`:由 ReMe 侧负责,消费方不触发
 
-`LongTermMemory` 契约里没有巩固步骤,而多租户 ReMe 又禁用了 `dream_cron`。若不补触发,
-**digest 长期层永不形成**,retrieve 只能命中 daily。两种触发方式(对应主提案 M8b / Q4):
+`LongTermMemory` 契约没有巩固步骤,多租户又禁用了 `dream_cron`。而 agentscope-java **只是这个
+记忆服务的调用方,不承担巩固职责**。因此 daily→digest 的巩固由 **ReMe 服务自身的按租户调度器**
+负责(主提案 M8b):自动挑"当天有新 daily"的租户离峰跑 `auto_dream`,适配器无需感知、也不
+依赖适配器触发。否则 **digest 长期层永不形成**,retrieve 只能命中 daily。
 
-- **ReMe 侧(默认)**:ReMe 内建按租户巩固调度器,自动挑"当天有新 daily"的租户离峰跑
-  `auto_dream`。适配器无需感知。
-- **宿主侧(可选加速)**:适配器/宿主在会话结束或每日定时显式:
-  ```
-  POST /auto_dream
-  X-Reme-Tenant: <userId>
-  ```
-  两者并用时以"当天是否已巩固"标记去重。
+`auto_dream` 作为既有 job 仍可被运维手动调用做回补,但不属于常规集成路径。
 
 ### 3.4 `proactive`(可选)
 
-`POST /proactive` + 租户头 → 取兴趣话题,由宿主决定是否经 `onSystemPrompt` 注入。
+`POST /proactive` + 租户头 → 取兴趣话题,由调用方决定是否经 `onSystemPrompt` 注入。
 
 ---
 
@@ -113,13 +100,12 @@ X-Reme-Tenant: <userId>
 |---|---|---|
 | 租户 | `RuntimeContext.userId` | `X-Reme-Tenant` 头 → `tenant_id` |
 | 会话 | `RuntimeContext.sessionId` | job 的 `session_id` 参数 |
-| 身份来源 | 框架/宿主认证后设入 `RuntimeContext` | 服务边界 `trusted_header` resolver 解析头 |
+| 身份来源 | 框架/调用方认证后设入 `RuntimeContext` | 服务边界 `trusted_header` resolver 解析头 |
 
 - **身份必须由边界注入,禁止走 body**;适配器绝不把 `tenant_id` 放进 JSON 负载(ReMe 会 400)。
-- **增量**:`session_append` 需要"自上次以来的新消息"。两种实现:
-  (a) 适配器侧记住每个 sessionId 上次已发送的消息游标,只发增量;
-  (b) 全量发送,由 ReMe `session_append` 以 uuid/序号去重(复用 `auto_memory_cc` 的去重思路)。
-  推荐 (a),网络与解析成本最低。
+- **增量**:`auto_memory` 蒸馏传入的消息,适配器应传"自上次以来的新消息"。首选适配器侧记住每个
+  sessionId 上次已发送的游标只发增量;去重语义沿用 `auto_memory` / `auto_memory_cc` 的现有行为,
+  不在适配器侧另造。
 
 ---
 
@@ -144,19 +130,20 @@ public class ReMeMemoryMiddleware implements MiddlewareBase {
             .onErrorReturn(prompt);                 // 记忆故障不阻断对话
     }
 
-    // 捕获:每回合结束后追加会话增量(廉价,不调 LLM)
+    // 记忆写入:回合结束后调用现有 auto_memory,只传本回合增量
     @Override public Flux<AgentEvent> onAgent(Agent a, RuntimeContext ctx, AgentInput in,
             Function<AgentInput, Flux<AgentEvent>> next) {
         return next.apply(in).concatWith(Flux.defer(() ->
-            http.post().uri("/session_append")
+            http.post().uri("/auto_memory")
                 .header("X-Reme-Tenant", ctx.getUserId())
                 .bodyValue(Map.of("session_id", ctx.getSessionId(), "messages", deltaOf(ctx, in)))
                 .retrieve().bodyToMono(Void.class).thenMany(Flux.empty())
-                .onErrorResume(e -> { log.warn("session_append failed", e); return Flux.empty(); })));
+                .onErrorResume(e -> { log.warn("auto_memory failed", e); return Flux.empty(); })));
     }
 }
 ```
-蒸馏(`auto_memory`)与巩固(`auto_dream`)由会话结束钩子或宿主定时任务触发,不在热路径。
+`auto_memory` 每次调用含一次蒸馏;若要压低频次,可改为在会话结束时调用而非每回合(调用方
+选择,不改 ReMe)。巩固(`auto_dream`)由 ReMe 侧调度器负责,不在此适配器内触发。
 
 优点:租户传递显式、零猜测;不绑废弃 SPI;单适配器 + 单连接池。
 代价:框架自带的 `longTermMemoryMode` 编排用不上,召回注入/写入时机自己定(即上面这段)。
@@ -186,8 +173,9 @@ public Mono<String> retrieve(Msg msg) {
 ## 6. 错误与降级
 
 - `retrieve` 失败:`onErrorReturn(prompt)`,不阻断对话(记忆是增强,非必需)。
-- `session_append` 失败:记录日志、丢弃该回合增量(下回合仍发后续增量;或适配器缓冲重试)。
-- `auto_memory`/`auto_dream` 失败:属离线路径,重试/告警,不影响在线对话。
+- `auto_memory` 失败(写入路径):记录日志、丢弃该回合增量(下回合仍发后续增量;或适配器缓冲重试),
+  不阻断在线对话。
+- `auto_dream`(巩固,ReMe 侧调度):失败在 ReMe 侧重试/告警,与在线对话无关。
 - 401/400:401 = 租户解析失败(检查头/凭据);400 = body 误带租户字段(适配器 bug,修正)。
 
 ---
@@ -195,10 +183,10 @@ public Mono<String> retrieve(Msg msg) {
 ## 7. 待验证 / 待与 ReMe 侧对齐
 
 - **V1** 路径 B 的 Reactor Context 是否暴露 `userId`(key 名、可见性)——决定 A/B 选型。
-- **V2** ReMe 是否新增 `session_append`(独立 job vs `auto_memory` capture-only 模式)——主提案 Q5。
-- **V3** 巩固触发默认 ReMe 侧调度还是宿主显式——主提案 Q4;适配器据此决定是否实现会话结束钩子。
+- **V2** `auto_memory` 对"仅传本回合增量"的处理与去重现状——确认无需适配器额外补偿(主提案 M8a)。
+- **V3**〔已定案〕巩固由 ReMe 侧调度器负责,消费方不触发(主提案 Q4);适配器不实现巩固触发。
 - **V4** `search` 是否支持"偏 digest 长期层"的检索范围/权重参数。
-- **V5** 会话预热接口:是否需要 ReMe 提供轻量"预热租户"入口,供宿主在会话开始时先行调用,
+- **V5** 会话预热接口:是否需要 ReMe 提供轻量"预热租户"入口,供调用方在会话开始时先行调用,
   把 LRU 冷加载移出 `retrieve` 热路径(主提案 Q7 / T14)。
 - **V6** 对上游的价值:`agentscope-extensions-reme` 目前仅覆盖老版 API,**v4 需要新的官方
   Java 适配器**——本契约可作为推动上游的具体切入点。

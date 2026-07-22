@@ -6,8 +6,8 @@
 - 范围:服务层、应用装配、组件生命周期。**不改变** workspace 磁盘布局、记忆文件格式、
   step/job 的业务代码与公共 schema 的既有字段。
 - v3 变更:修正组件"共享/租户"划分轴(`FILE_CHUNKER`/`AGENT_WRAPPER` 归租户作用域,
-  见第 4 节);新增记忆写路径的捕获/蒸馏拆分与 digest 巩固触发者(M8);补跨作用域 bind、
-  巩固触发、写路径隔离等测试(T11–T14)。
+  见第 4 节);记忆写路径沿用现有 `auto_memory`(不新增 job),digest 巩固定为 ReMe 侧按租户
+  调度器(M8);补跨作用域 bind、巩固触发、写路径隔离等测试(T11–T14)。
 
 ---
 
@@ -196,31 +196,26 @@ multi_tenant:
 
 本模块是多租户与 file-native 记忆管道(session → daily → digest)对齐的核心,分三层。
 
-**(a) 捕获与蒸馏分离(`record` 的粒度对齐)。**
-`auto_memory` 一次调用 = 一次 `agent_wrapper.reply` 的 LLM 蒸馏(`auto_memory.py:299`),
-且蒸馏的是传入的全量 `format_history(messages)`(`:295`),自身不算增量。消费方(如
-agentscope-java 的 `record(List<Msg>)`,每回合触发)若每轮传全量历史,则每轮重蒸馏整段,
-成本随会话长度二次增长。对齐做法——利用 ReMe 内部本已分离的两段
-(`_save_session_messages` 便宜的会话 append 总是执行;`agent_wrapper.reply` 昂贵蒸馏):
+**(a) 写入沿用现有 `auto_memory`,不新增 job。**
+`auto_memory` 内部**本就分两段**:先 `_save_session_messages` 廉价落盘会话到
+`session/dialog/<id>.jsonl`,再由 `agent_wrapper.reply` 做 LLM 蒸馏为 daily 卡片
+(`auto_memory.py:262,299`),并按 (day, session_id) 合并到同一张 daily 笔记。这已是成熟设计,
+本方案**不发明** `session_append` 之类的新 job,消费侧的 `record` 直接映射到现有 `auto_memory`。
 
-- `session_append`(新增轻量 job,或 `auto_memory` 的 capture-only 模式):仅按 session_id
-  把增量追加到 `session/dialog/<id>.jsonl`,不调 LLM;
-- `auto_memory`(蒸馏):由会话结束或定时触发,读取该 session 自上次以来的增量蒸馏为 daily。
-
-调用方只传增量;或由 `session_append` 以 uuid/序号去重承担增量语义(复用 `auto_memory_cc`
-的 uuid 去重思路)。
+需要留意的只是**调用节奏**(这是调用方的选择,不改 ReMe):`auto_memory` 每次调用都会跑一次
+蒸馏(`:299`),且蒸馏传入的 `format_history(messages)`(`:295`)——因此调用方应传本回合增量
+而非全量历史,且可选择每回合调用或会话结束时调用,以控制蒸馏频次。增量与去重语义沿用
+`auto_memory`/`auto_memory_cc` 现有行为,不在本方案内另造。
 
 **(b) 巩固触发者(digest 层的对齐——本方案此前的悬空点)。**
-多租户禁用 `dream_cron` 后,daily→digest 的 `auto_dream` 失去自动触发者;若消费契约(如
-agentscope 的 `record`/`retrieve`)也不含巩固钩子,则 **digest 长期层永不形成**——而这正是
-v4 分层记忆的价值所在。必须显式补触发,二选一或并用:
+多租户禁用 `dream_cron` 后,daily→digest 的 `auto_dream` 失去自动触发者;而消费方(如
+agentscope-java)只是**调用这个记忆服务**,不承担巩固职责。因此巩固必须由 **ReMe 服务自身**
+负责,否则 **digest 长期层永不形成**——而这正是 v4 分层记忆的价值所在。
 
-- **ReMe 侧(默认)**:新增按租户的巩固调度器(Application 自身的维护协程,非配置
-  BackgroundJob),每周期挑"当天产生新 daily 的租户"入队,带全局并发上限离峰执行
-  `auto_dream`;
-- **宿主侧**:调用方在会话结束/定时显式 `POST /auto_dream`(带租户头)作为可选加速。
-
-评审点见 Q4。
+**定案**:巩固由 ReMe 侧的按租户调度器负责——`Application` 自身的维护协程(非配置
+BackgroundJob),每周期挑"当天产生新 daily 的租户"入队,带全局并发上限离峰执行 `auto_dream`。
+消费方无需感知,也不依赖消费方触发。`auto_dream` 作为既有 base job 仍可按需手动调用(运维/
+回补场景),但不作为常规集成路径。
 
 **(c) 配置模板 `reme/config/multi_tenant.yaml`(`config=multi_tenant` 即用):**
 
@@ -282,8 +277,8 @@ v4 分层记忆的价值所在。必须显式补触发,二选一或并用:
 | T13 | 写路径不串租户 | 租户 A 的 `auto_memory` 蒸馏产物只落在 A 的 `daily/`,不出现在全局/其它租户(验证 M1 分类修正) |
 | T14 | 会话预热 | 会话开始预热后,首个 `retrieve` 不触发冷加载尖峰 |
 
-集成测试:双租户端到端(HTTP 认证 → session_append → auto_memory → auto_dream → search →
-proactive),复用 `tests/integration/_workspace_fixture.py` 的隔离约定。
+集成测试:双租户端到端(HTTP 认证 → auto_memory → auto_dream → search → proactive),
+复用 `tests/integration/_workspace_fixture.py` 的隔离约定。
 
 ## 8. 工作量与依赖
 
@@ -335,13 +330,13 @@ M2 ─┼─→ M3 ─→ M4 ─→ M5 ─→ M6 ─→ M7 ─→ 集成测试
 - **Q2** 运维类 job(`version`/`health_check`)是否豁免认证?豁免方便探活,不豁免面一致。
 - **Q3** 保留 kwarg 命名 `__tenant__` vs 独立调用通道(如 `BaseJob.call_scoped()`)。
   前者改动最小,后者类型更显式。
-- **Q4** 巩固触发:ReMe 侧按租户调度器(默认)之外,是否同时开放宿主侧显式 `auto_dream`?
-  两者并用时如何避免重复巩固(建议以"当天是否已巩固"的 daily 标记去重)。
-- **Q5** `record` 拆分:新增独立 `session_append` job,还是给 `auto_memory` 加 capture-only
-  模式?前者契约更清晰,后者复用现有 job。
+- **Q4**〔已定案〕巩固触发由 **ReMe 侧按租户调度器**负责,消费方不承担、也不依赖其触发
+  (见 M8b)。`auto_dream` 仍可手动调用作运维回补。
+- **Q5**〔已定案〕`record` **沿用现有 `auto_memory`,不新增 job**(其内部已分离廉价捕获与
+  LLM 蒸馏);调用节奏与增量由调用方掌握(见 M8a)。
 - **Q6** 默认认证 resolver:鉴于 5000 用户 + 增删,`static_token_map` 仅作演示,生产默认应为
-  `trusted_header`(宿主认证,ReMe 不维护凭据)还是 JWT/DB 动态 resolver?
+  `trusted_header`(由调用方认证,ReMe 不维护凭据)还是 JWT/DB 动态 resolver?
 - **Q7** 租户生命周期:是否新增租户级 `memory_export` / `memory_delete` job(GDPR/离网),
-  以及是否需要"会话预热"job 供宿主在会话开始时调用。
+  以及是否需要"会话预热"job 供调用方在会话开始时调用。
 - **Q8** Phase 0(多 `Application` 同进程共存的契约化测试)是否作为独立 PR 先行?
   它同时为本提案的 M4 提供回归安全网。
