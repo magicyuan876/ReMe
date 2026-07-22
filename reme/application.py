@@ -1,21 +1,20 @@
 """Main application entry point."""
 
 import asyncio
-import heapq
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import AsyncGenerator, TypeVar
 
 from . import __version__
-from .components import BaseComponent, ApplicationContext
+from .components import BaseComponent, ApplicationContext, wiring
 from .components.job import BackgroundJob, BaseJob, CronJob, StreamJob
 from .components.service import BaseService
-from .enumeration import ComponentEnum
+from .components.tenant_manager import TenantManager
+from .enumeration import ComponentEnum, TENANT_SCOPED_TYPES
 from .schema import ComponentConfig, Response, StreamChunk
 from .utils import execute_stream_task, print_logo, get_logger
 
 T = TypeVar("T", bound=BaseComponent)
-_NodeKey = tuple[ComponentEnum, str]
 
 
 class Application(BaseComponent):
@@ -40,6 +39,7 @@ class Application(BaseComponent):
         self._init_service()
         self._init_components()
         self._init_jobs()
+        self._init_multi_tenant()
 
     @property
     def config(self):
@@ -49,20 +49,19 @@ class Application(BaseComponent):
     # ----- Wiring (called once during __init__) --------------------------
 
     def _setup_workspace_directories(self) -> None:
-        """Ensure the workspace root and configured subdirectories exist on disk."""
+        """Ensure the workspace root and configured subdirectories exist on disk.
+
+        In multi-tenant mode only the tenants root is created here; each tenant's
+        workspace subdirectories are created lazily by the TenantManager on first use.
+        """
         cfg = self.config
-        workspace_path = Path(cfg.workspace_dir).absolute()
-        workspace_path.mkdir(parents=True, exist_ok=True)
-        for subdir in [
-            cfg.metadata_dir,
-            cfg.session_dir,
-            cfg.mem_session_dir,
-            cfg.resource_dir,
-            cfg.daily_dir,
-            cfg.digest_dir,
-        ]:
-            if subdir:
-                (workspace_path / subdir).mkdir(parents=True, exist_ok=True)
+        if cfg.multi_tenant.enabled:
+            root = cfg.multi_tenant.workspaces_root
+            if not root:
+                raise ValueError("multi_tenant.enabled requires multi_tenant.workspaces_root")
+            Path(root).absolute().mkdir(parents=True, exist_ok=True)
+            return
+        wiring.ensure_workspace(cfg.workspace_dir, cfg)
 
     def _init_service(self) -> None:
         """Instantiate the single service backend declared in config.service."""
@@ -74,9 +73,17 @@ class Application(BaseComponent):
         )
 
     def _init_components(self) -> None:
-        """Instantiate every component declared under config.components."""
+        """Instantiate every component declared under config.components.
+
+        In multi-tenant mode, workspace-bound component types (TENANT_SCOPED_TYPES) are
+        NOT instantiated here — their configs stay as templates that the TenantManager
+        instantiates per tenant. Only workspace-agnostic shared components are built now.
+        """
+        multi_tenant = self.config.multi_tenant.enabled
         for ctype, group in self.config.components.items():
             self.context.components[ctype] = {}
+            if multi_tenant and ctype in TENANT_SCOPED_TYPES:
+                continue
             for name, cfg in group.items():
                 self.context.components[ctype][name] = self._instantiate(
                     ctype,
@@ -106,76 +113,29 @@ class Application(BaseComponent):
         expected_type: type[T],
         name: str | None = None,
     ) -> T:
-        """Resolve cfg.backend through the registry and construct the instance.
-
-        `label` is the human-readable identifier used only in error messages.
-        `expected_type` narrows the return type and guards against a backend
-        registered under the wrong ComponentEnum.
-        `name` is forwarded to the constructor for named components/jobs;
-        leave it None for the service, which is keyed solely by type.
-        """
-        # Lazy import: the registry self-populates as component modules load.
-        from .components import R
-
-        if not cfg.backend:
-            raise ValueError(f"{label} is missing the required 'backend' field")
-        backend_cls = R.get(ctype, cfg.backend)
-        if backend_cls is None:
-            raise ValueError(f"Unregistered backend '{cfg.backend}' for {label}")
-
-        params = cfg.model_dump()
-        params["app_context"] = self.context
-        if name is not None:
-            params.setdefault("name", name)
-        instance = backend_cls(**params)
-        if not isinstance(instance, expected_type):
-            got, want = type(instance).__name__, expected_type.__name__
-            raise TypeError(f"{label} backend '{cfg.backend}' produced {got}, expected {want} subclass")
-        return instance
-
-    # ----- Dependency ordering ------------------------------------------
+        """Construct a component bound to this Application's shared context."""
+        return wiring.instantiate(ctype, cfg, self.context, label=label, expected_type=expected_type, name=name)
 
     def _topological_order(self) -> list[BaseComponent]:
-        """Return components in dependency order via Kahn's algorithm; raise on missing dep or cycle."""
-        nodes: dict[_NodeKey, BaseComponent] = {
-            (ctype, name): comp for ctype, group in self.context.components.items() for name, comp in group.items()
-        }
-        in_degree, dependents = self._build_dependency_graph(nodes)
+        """Return the shared components in dependency order (delegates to wiring)."""
+        return wiring.topological_order(self.context.components)
 
-        ready = [k for k, d in in_degree.items() if d == 0]
-        heapq.heapify(ready)
-        ordered: list[BaseComponent] = []
-        while ready:
-            key = heapq.heappop(ready)
-            ordered.append(nodes[key])
-            for downstream in dependents[key]:
-                in_degree[downstream] -= 1
-                if in_degree[downstream] == 0:
-                    heapq.heappush(ready, downstream)
-
-        if len(ordered) != len(nodes):
-            unresolved = [f"{k[0].value}:{k[1]}" for k, d in in_degree.items() if d > 0]
-            raise ValueError(f"Circular dependency detected among: {unresolved}")
-        return ordered
-
-    @staticmethod
-    def _build_dependency_graph(
-        nodes: dict[_NodeKey, BaseComponent],
-    ) -> tuple[dict[_NodeKey, int], dict[_NodeKey, list[_NodeKey]]]:
-        """Compute in-degree and adjacency lists; raise if a required dep is missing."""
-        in_degree: dict[_NodeKey, int] = dict.fromkeys(nodes, 0)
-        dependents: dict[_NodeKey, list[_NodeKey]] = {k: [] for k in nodes}
-        for key, comp in nodes.items():
-            for dep in comp.dependencies:
-                dep_key = (dep.ctype, dep.name)
-                if dep_key in nodes:
-                    dependents[dep_key].append(key)
-                    in_degree[key] += 1
-                elif not dep.optional:
-                    raise ValueError(
-                        f"Component {key[0].value}:{key[1]} depends on unregistered {dep.ctype.value}:{dep.name}",
-                    )
-        return in_degree, dependents
+    def _init_multi_tenant(self) -> None:
+        """In multi-tenant mode, validate job compatibility and build the TenantManager."""
+        if not self.config.multi_tenant.enabled:
+            return
+        background = sorted(name for name, job in self.context.jobs.items() if isinstance(job, BackgroundJob))
+        if background:
+            raise ValueError(
+                "multi_tenant mode does not support background/cron jobs "
+                f"({', '.join(background)}); use the multi_tenant config template "
+                "(watch loops and dream_cron removed, consolidation runs per-tenant).",
+            )
+        self.context.tenant_manager = TenantManager(self.context)
+        self.logger.info(
+            f"Multi-tenant mode enabled: workspaces_root={self.config.multi_tenant.workspaces_root!r} "
+            f"max_active_tenants={self.config.multi_tenant.max_active_tenants}",
+        )
 
     # ----- Lifecycle -----------------------------------------------------
 
@@ -194,6 +154,8 @@ class Application(BaseComponent):
             cron_jobs = [j for j in jobs if isinstance(j, CronJob)]
             for c in components + base_jobs + stream_jobs + background_jobs + cron_jobs:
                 await self._start_one(c)
+            if getattr(self.context, "tenant_manager", None) is not None:
+                self.context.tenant_manager.start_maintenance()
         except Exception:
             await self._close()
             raise
@@ -211,6 +173,13 @@ class Application(BaseComponent):
 
     async def _close(self) -> None:
         """Close in reverse start order so every peer outlives its dependents."""
+        # Close tenant component sets first: they depend on shared components
+        # (e.g. a tenant embedding_store on the shared as_embedding).
+        if getattr(self.context, "tenant_manager", None) is not None:
+            try:
+                await self.context.tenant_manager.close_all()
+            except Exception as e:
+                self.logger.exception(f"Failed to close tenant_manager: {e}")
         for c in reversed(self._started_components):
             try:
                 await c.close()

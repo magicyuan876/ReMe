@@ -29,6 +29,8 @@ class ApplicationContext:
         self.components: dict[ComponentEnum, dict[str, "BaseComponent"]] = {}
         self.jobs: dict[str, "BaseJob"] = {}
         self.thread_pool: ThreadPoolExecutor | None = None
+        # Set by Application only in multi-tenant mode; owns per-tenant component sets.
+        self.tenant_manager: Any = None
 
         # Application-lifetime shared state. Values remain available across Job and Step
         # invocations while this Application is running, so Jobs may keep cross-call state here.

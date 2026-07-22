@@ -12,12 +12,25 @@ class StreamJob(BaseJob):
 
     async def __call__(self, **kwargs) -> None:
         """Run steps; emit failures as ERROR chunks, then a terminal DONE marker."""
+        tenant_id = kwargs.pop("__tenant__", None)
         merged = {**self.kwargs, **kwargs}
+        tenant_context = None
+        if tenant_id is not None:
+            tenant_context = await self._acquire_tenant_context(tenant_id)
+            tenant_context.in_flight += 1
         context = RuntimeContext(**merged)
+        if tenant_id is not None:
+            context["tenant_id"] = tenant_id
         try:
-            for step in self._build_steps():
+            steps = self._build_steps(app_context=tenant_context) if tenant_context is not None else self._build_steps()
+            for step in steps:
                 await step(context)
+            if tenant_context is not None:
+                tenant_context.dirty = True
         except Exception as e:
             await context.add_stream_string(str(e), ChunkEnum.ERROR)
-        # Always emit DONE so consumers can detach even after an error.
-        await context.add_stream_done()
+        finally:
+            if tenant_context is not None:
+                tenant_context.in_flight -= 1
+            # Always emit DONE so consumers can detach even after an error.
+            await context.add_stream_done()

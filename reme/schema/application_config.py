@@ -24,6 +24,56 @@ class JobConfig(ComponentConfig):
     enable_serve: bool = Field(default=True, description="Whether to expose this job through the service layer")
 
 
+class MultiTenantAuthConfig(BaseModel):
+    """Service-boundary tenant identity resolution config."""
+
+    model_config = ConfigDict(extra="allow")
+
+    backend: str = Field(
+        default="trusted_header",
+        description="TenantResolver backend: 'trusted_header' (behind a trusted gateway) or 'static_token_map'",
+    )
+    header: str = Field(default="X-Reme-Tenant", description="Header carrying the tenant id (trusted_header backend)")
+    token_header: str = Field(
+        default="Authorization",
+        description="Header carrying the bearer credential (static_token_map backend)",
+    )
+    tokens: dict[str, str] = Field(
+        default_factory=dict,
+        description="credential -> tenant_id map (static_token_map backend); values support ${ENV} expansion",
+    )
+    exempt_jobs: list[str] = Field(
+        default_factory=lambda: ["version", "health_check", "help"],
+        description="Tenant-agnostic ops jobs served without authentication",
+    )
+
+
+class MultiTenantConfig(BaseModel):
+    """Opt-in multi-tenant mode: one process serves many tenants, each a workspace under workspaces_root."""
+
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool = Field(default=False, description="Enable multi-tenant mode; default off preserves single-workspace")
+    workspaces_root: str = Field(default="", description="Root dir holding one workspace subdir per tenant; required")
+    max_active_tenants: int = Field(default=300, description="LRU bound on resident (started) tenant component sets")
+    tenant_idle_close_seconds: float = Field(default=1800.0, description="Idle seconds before eviction; 0 disables")
+    idle_sweep_seconds: float = Field(default=60.0, description="Interval of the idle-eviction maintenance sweep")
+    tenant_id_pattern: str = Field(
+        default=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+        description="Regex a tenant id must match; forbids path separators and a leading dot",
+    )
+    consolidation_enabled: bool = Field(
+        default=True,
+        description="Run the ReMe-side per-tenant auto_dream scheduler (replaces the disabled dream_cron)",
+    )
+    consolidation_job: str = Field(default="auto_dream", description="Job name the consolidation scheduler invokes")
+    consolidation_interval_seconds: float = Field(
+        default=3600.0,
+        description="How often the consolidation scheduler scans active tenants for new daily notes",
+    )
+    auth: MultiTenantAuthConfig = Field(default_factory=MultiTenantAuthConfig, description="Boundary identity config")
+
+
 class ApplicationConfig(BaseModel):
     """Root config for the ReMe application."""
 
@@ -51,4 +101,8 @@ class ApplicationConfig(BaseModel):
     components: dict[ComponentEnum, dict[str, ComponentConfig]] = Field(
         default_factory=dict,
         description="Component registry keyed by type then name",
+    )
+    multi_tenant: MultiTenantConfig = Field(
+        default_factory=MultiTenantConfig,
+        description="Multi-tenant mode config; disabled by default",
     )

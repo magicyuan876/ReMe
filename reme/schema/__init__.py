@@ -1,6 +1,12 @@
 """Schema"""
 
-from .application_config import ApplicationConfig, ComponentConfig, JobConfig
+from .application_config import (
+    ApplicationConfig,
+    ComponentConfig,
+    JobConfig,
+    MultiTenantAuthConfig,
+    MultiTenantConfig,
+)
 from .dream import (
     DreamExtractOutput,
     DreamState,
@@ -23,6 +29,8 @@ __all__ = [
     "ApplicationConfig",
     "ComponentConfig",
     "JobConfig",
+    "MultiTenantAuthConfig",
+    "MultiTenantConfig",
     "DreamExtractOutput",
     "DreamState",
     "DreamTopic",

@@ -13,11 +13,14 @@ from . import job
 from . import keyword_index
 from . import service
 from . import tokenizer
+from . import wiring
 from .application_context import ApplicationContext
 from .base_component import BaseComponent, ComponentMixin
 from .component_registry import ComponentRegistry, R
 from .prompt_handler import PromptHandler
 from .runtime_context import RuntimeContext
+from .tenant_context import TenantContext
+from .tenant_manager import TenantManager
 
 __all__ = [
     "ApplicationContext",
@@ -27,6 +30,9 @@ __all__ = [
     "R",
     "PromptHandler",
     "RuntimeContext",
+    "TenantContext",
+    "TenantManager",
+    "wiring",
     # base components
     "agent_wrapper",
     "as_llm",

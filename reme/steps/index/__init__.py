@@ -4,6 +4,7 @@ from .bm25_search import Bm25SearchStep
 from .clear_paths import ClearPathsStep
 from .clear_store import ClearStoreStep
 from .draft import AddDraftStep, ReadAllDraftStep
+from .emit_changes import EmitChangeStep
 from .log_changes import LogChangesStep
 from .node_search import NodeSearchStep
 from .init_changes import InitChangesStep
@@ -25,6 +26,7 @@ __all__ = [
     "ChangeApplyStep",
     "ClearPathsStep",
     "ClearStoreStep",
+    "EmitChangeStep",
     "DEFAULT_LOW_POWER_POLL_MS",
     "DEFAULT_WATCH_DEBOUNCE_MS",
     "DEFAULT_WATCH_STEP_MS",

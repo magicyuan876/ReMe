@@ -221,8 +221,10 @@ BackgroundJob),每周期挑"当天产生新 daily 的租户"入队,带全局并�
 
 - 移除三个 watch 循环与 `dream_cron`(N 租户不能各挂 OS 文件监视器;写入均过 API;
   这也是 M5 启动校验的依据);
-- `write` / `daily_write` / `edit` / `move` / `delete` 追加 `update_index_step`(F8:该 step
-  从上下文消费 `changes`,纯配置组合),保证写后即可检索;
+- `write` / `daily_write` / `edit` / `move` / `delete` 追加 `emit_change_step` + `update_index_step`,
+  保证写后即可检索。实现说明:`write_step` 等本身不产出 `changes`,故新增极小的 `emit_change_step`
+  把本步触及的路径(`path`/`src_path`/`dst_path`)转成 `changes` 批次,再由既有 `update_index_step`
+  按文件存在性 reconcile 出增/改/删——一个 glue step 覆盖 create/update/rename/delete;
 - `agent_wrapper` 只允许内进程 `agentscope` 后端;`claude_code` / `codex` 等子进程后端在
   多租户模板中**禁用**——它们既无法按租户廉价实例化,`cwd` 也约束不住子进程对服务器全盘
   的访问(与 `auto_memory_cc` 移除同理);
