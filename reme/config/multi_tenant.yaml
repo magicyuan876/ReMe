@@ -53,12 +53,16 @@ jobs:
       topic_session_id: interests
       scan_days: 2
       max_units: 5
+      agent_wrapper: strong
     - backend: dream_integrate_step
+      agent_wrapper: strong
     - backend: dream_topics_step
       topic_count: 3
       topic_diversity_days: 7
+      agent_wrapper: strong
     - backend: dream_finish_step
       file_catalog: dream
+      agent_wrapper: strong
   auto_memory:
     backend: base
     description: 'Auto-memory: record conversation facts into a daily note'
@@ -531,7 +535,19 @@ components:
   as_llm:
     default:
       backend: ${LLM_BACKEND:-openai}
-      model: ${LLM_MODEL_NAME:-qwen3.7-plus}
+      model: ${LLM_MODEL_NAME:-qwen3.6-flash}
+      stream: true
+      context_size: 200000
+      max_retries: 3
+      credential:
+        api_key: ${LLM_API_KEY:-}
+        base_url: ${LLM_BASE_URL:-}
+      parameters:
+        max_tokens: 65536
+        thinking_enable: false
+    strong:
+      backend: ${LLM_BACKEND:-openai}
+      model: ${LLM_DREAM_MODEL_NAME:-qwen3.7-max}
       stream: true
       context_size: 200000
       max_retries: 3
@@ -545,6 +561,18 @@ components:
     default:
       backend: agentscope
       as_llm: default
+      permission_mode: bypass
+      react_config:
+        max_iters: 30
+      context_config:
+        trigger_ratio: 0.8
+        reserve_ratio: 0.1
+        tool_result_limit: 50000
+      model_config:
+        max_retries: 1
+    strong:
+      backend: agentscope
+      as_llm: strong
       permission_mode: bypass
       react_config:
         max_iters: 30
