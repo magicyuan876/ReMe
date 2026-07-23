@@ -7,8 +7,17 @@
 # raw port to untrusted clients.
 FROM python:3.11-slim
 
+# PyPI index. Defaults to a fast China mirror for internal builds; override for a
+# company mirror, e.g. --build-arg PIP_INDEX_URL=https://nexus.your-corp/repository/pypi/simple
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+ARG PIP_TRUSTED_HOST=mirrors.aliyun.com
+
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=8 \
     REME_WORKSPACES_ROOT=/data/tenants \
     REME_HOST=0.0.0.0 \
     REME_PORT=2333
@@ -19,12 +28,14 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY reme ./reme
 
-# Install the package (base deps) plus the workspace-bound core deps the
-# multi-tenant config actually uses. The codex / claude-code agent backends are
-# disabled in the multi-tenant template, so their SDKs (openai-codex,
-# claude-agent-sdk) are intentionally omitted to keep the image lean.
+# Install base deps (from pyproject) + agentscope. That is ALL the multi-tenant
+# default config needs: it uses the in-process agentscope agent backend, the
+# `local` file_store / file_graph, and the `regex` tokenizer — none of which need
+# faiss / jieba / rjieba / neo4j / networkx (those are lazy-imported, only when
+# you switch to the faiss store / jieba tokenizer / neo4j graph backends).
+# To enable those backends, add: pip install faiss-cpu jieba rjieba neo4j networkx
 RUN pip install . && \
-    pip install "agentscope==2.0.4.post1" faiss-cpu jieba rjieba neo4j networkx
+    pip install "agentscope==2.0.4.post1"
 
 # Persistent per-tenant workspaces live here; mount a volume.
 VOLUME ["/data"]
