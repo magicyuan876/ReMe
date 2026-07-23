@@ -58,3 +58,6 @@ site/
 
 evaluation/
 datasets/
+
+# stray sharded test data
+deploy/**/test-data/
