@@ -45,6 +45,8 @@ temp*/
 
 # ReMe runtime data
 .reme/
+.reme_tenants/
+tenant-data/
 vault/
 *.db
 *.sqlite
