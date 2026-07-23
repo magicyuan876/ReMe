@@ -535,7 +535,7 @@ components:
   as_llm:
     default:
       backend: ${LLM_BACKEND:-openai}
-      model: ${LLM_MODEL_NAME:-qwen3.6-flash}
+      model: ${LLM_MODEL_NAME:-qwen-flash}
       stream: true
       context_size: 200000
       max_retries: 3
@@ -547,7 +547,7 @@ components:
         thinking_enable: false
     strong:
       backend: ${LLM_BACKEND:-openai}
-      model: ${LLM_DREAM_MODEL_NAME:-qwen3.7-max}
+      model: ${LLM_DREAM_MODEL_NAME:-qwen-max}
       stream: true
       context_size: 200000
       max_retries: 3
