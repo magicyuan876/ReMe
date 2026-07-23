@@ -1,0 +1,45 @@
+# Sharded multi-instance deployment for multi-tenant ReMe.
+#
+# Use this INSTEAD of the single-instance root docker-compose.yml when you need
+# to use more than one CPU core / want fault isolation. nginx routes each tenant
+# (consistent hash on X-Reme-Tenant) to exactly one shard, so every shard can
+# safely share one tenant-data volume. The backend still talks to a single
+# endpoint (:2333) — sharding is transparent to callers.
+#
+# Prereqs:
+#   1) Build the image once from the repo root:  docker build -t reme-multitenant:latest .
+#   2) Have a .env at the repo root (same one the single-instance deploy uses).
+#
+# Run:   docker compose -f deploy/sharded/docker-compose.yml up -d
+#
+# Overridable via env: REME_GATEWAY_PORT (host port), REME_DATA_DIR (host data dir).
+name: reme-sharded
+
+x-shard: &shard
+  image: reme-multitenant:latest
+  restart: unless-stopped
+  env_file:
+    - ../../.env
+  environment:
+    REME_WORKSPACES_ROOT: /data/tenants
+    REME_HOST: 0.0.0.0
+    REME_PORT: "2333"
+    # Per-shard LRU cap. Rule of thumb: (machine RAM budget) / (shard count) / (~MB per active tenant).
+    # Override in .env as needed, e.g. multi_tenant.max_active_tenants via the command below.
+  volumes:
+    - ${REME_DATA_DIR:-../../tenant-data}:/data
+
+services:
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${REME_GATEWAY_PORT:-2333}:2333"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [reme0, reme1, reme2, reme3]
+
+  reme0: *shard
+  reme1: *shard
+  reme2: *shard
+  reme3: *shard
