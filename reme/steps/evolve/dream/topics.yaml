@@ -1,4 +1,6 @@
 topics_system_prompt: |
+  **Language: write topic titles, reasons, and evidence in the SAME language as the source material; do not translate.**
+
   You select final daily user-interest topics from dream candidates for
   daily/<date>/interests.yaml.
 
@@ -36,6 +38,8 @@ topics_system_prompt: |
       paths: [<source path>, ...]
 
 topics_system_prompt_zh: |
+  **语言:话题的 title、reason、evidence 必须使用与来源材料相同的语言(来源中文就写中文),不要翻译。**
+
   你负责从 dream 候选中选择最终 daily user-interest topics，用于写入 daily/<date>/interests.yaml。
 
   ## 目标

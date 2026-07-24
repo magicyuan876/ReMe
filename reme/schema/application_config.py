@@ -67,9 +67,17 @@ class MultiTenantConfig(BaseModel):
         description="Run the ReMe-side per-tenant auto_dream scheduler (replaces the disabled dream_cron)",
     )
     consolidation_job: str = Field(default="auto_dream", description="Job name the consolidation scheduler invokes")
+    consolidation_cron: str = Field(
+        default="0 3 * * *",
+        description="Cron expression (in the app timezone) for off-peak consolidation; empty = use interval mode",
+    )
+    consolidation_startup_scan: bool = Field(
+        default=True,
+        description="Run one catch-up consolidation shortly after startup so fresh deploys build digest promptly",
+    )
     consolidation_interval_seconds: float = Field(
         default=3600.0,
-        description="How often the consolidation scheduler scans tenants on disk for new daily notes",
+        description="Fallback scan interval (seconds) used only when consolidation_cron is empty",
     )
     consolidation_concurrency: int = Field(
         default=2,

@@ -166,7 +166,7 @@ class TenantManager:
         loop = asyncio.get_event_loop()
         if self.config.tenant_idle_close_seconds and self.config.idle_sweep_seconds > 0:
             self._tasks.append(loop.create_task(self._idle_sweep_loop()))
-        if self.config.consolidation_enabled and self.config.consolidation_interval_seconds > 0:
+        if self.config.consolidation_enabled:
             self._tasks.append(loop.create_task(self._consolidation_loop()))
 
     async def _idle_sweep_loop(self) -> None:
@@ -180,25 +180,62 @@ class TenantManager:
                     await self._close_tenant(tctx)
 
     async def _consolidation_loop(self) -> None:
-        """Periodically consolidate (auto_dream) every tenant with new daily content.
+        """Consolidate (auto_dream) every tenant with new daily content, off-peak.
 
-        Replaces the disabled ``dream_cron``. This scans the workspaces on DISK — not
-        the in-memory LRU — so a tenant is consolidated even if it wrote and then got
-        evicted, and the schedule survives restarts. A per-tenant marker file records
-        the last consolidation time; a tenant is "due" when any daily file is newer
-        than its marker. ``auto_dream``'s own catalog does the fine-grained change
-        detection and skips the LLM when nothing actually changed.
+        Replaces the disabled ``dream_cron``. Scans the workspaces on DISK — not the
+        in-memory LRU — so a tenant is consolidated even if it wrote and then got
+        evicted, and the schedule survives restarts. Each tenant carries a marker file
+        (``metadata/.dream_scan``); a tenant is "due" when any daily file is newer than
+        its marker. ``auto_dream``'s own catalog does fine-grained change detection and
+        skips the LLM when nothing actually changed.
+
+        Steady-state cadence is driven by ``consolidation_cron`` (default off-peak,
+        03:00 in the app timezone); when empty it falls back to a fixed interval. A
+        one-off startup catch-up runs shortly after boot so fresh deploys/restarts
+        build digest without waiting for the next off-peak window.
         """
-        interval = float(self.config.consolidation_interval_seconds)
-        # First pass shortly after startup (not a full interval later), so fresh
-        # deployments and restarts build digest promptly instead of after ~1 hour.
-        await asyncio.sleep(min(60.0, interval))
+        if self.config.consolidation_startup_scan:
+            await asyncio.sleep(60.0)
+            if not self._stopping:
+                try:
+                    await self._consolidate_due_tenants()
+                except Exception as e:  # pragma: no cover - best-effort background
+                    self.logger.exception(f"[tenant_manager] startup consolidation scan failed: {e}")
+
+        cron_expr = (self.config.consolidation_cron or "").strip()
+        use_cron = bool(cron_expr) and self._cron_valid(cron_expr)
+        if cron_expr and not use_cron:
+            self.logger.warning(f"[tenant_manager] invalid consolidation_cron {cron_expr!r}; using interval mode")
+        self.logger.info(
+            f"[tenant_manager] consolidation schedule: {'cron ' + cron_expr if use_cron else 'interval'}",
+        )
         while not self._stopping:
+            delay = self._next_cron_delay(cron_expr) if use_cron else float(self.config.consolidation_interval_seconds)
+            await asyncio.sleep(max(1.0, delay))
+            if self._stopping:
+                break
             try:
                 await self._consolidate_due_tenants()
             except Exception as e:  # pragma: no cover - best-effort background
                 self.logger.exception(f"[tenant_manager] consolidation scan failed: {e}")
-            await asyncio.sleep(interval)
+
+    @staticmethod
+    def _cron_valid(cron_expr: str) -> bool:
+        from croniter import croniter
+
+        return bool(croniter.is_valid(cron_expr))
+
+    def _next_cron_delay(self, cron_expr: str) -> float:
+        """Seconds until the next cron fire, in the configured app timezone."""
+        import datetime
+        from zoneinfo import ZoneInfo
+
+        from croniter import croniter
+
+        tz_name = self._global.app_config.timezone
+        now = datetime.datetime.now(ZoneInfo(tz_name)) if tz_name else datetime.datetime.now()
+        nxt = croniter(cron_expr, now).get_next(datetime.datetime)
+        return max(0.0, (nxt - now).total_seconds())
 
     async def _consolidate_due_tenants(self) -> None:
         """Run auto_dream for every tenant whose daily content changed since last time."""

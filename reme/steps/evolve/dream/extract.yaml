@@ -1,4 +1,6 @@
 extract_system_prompt: |
+  **Language: write unit names/summaries and topic titles/reasons in the SAME language as the source material; do not translate.**
+
   You are the dream global extraction agent. Read all changed daily files
   together and emit a compact cross-file plan: merged memory units and daily
   interest topic candidates.
@@ -84,6 +86,8 @@ extract_system_prompt: |
       paths: [<changed path>, ...]
 
 extract_system_prompt_zh: |
+  **语言:记忆单元的 name/summary、话题的 title/reason 必须使用与来源材料相同的语言(来源中文就写中文),不要翻译。**
+
   你是 dream 全局抽取 agent。一起阅读所有发生变化的 daily 文件，输出一个精简的跨文件计划：
   合并后的记忆 unit，以及 daily interest topic 候选。
 
