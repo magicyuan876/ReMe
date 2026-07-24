@@ -99,9 +99,6 @@ class BaseJob(BaseComponent):
         try:
             for step in self._build_steps(app_context=tenant_context):
                 await step(context)
-            if context.response.success:
-                # Signal the consolidation scheduler that this tenant had activity.
-                tenant_context.dirty = True
         except Exception as e:
             self.logger.exception(f"Failed to execute job '{self.name}' for tenant {tenant_id!r}: {e}")
             context.response.success = False

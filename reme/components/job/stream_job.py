@@ -25,8 +25,6 @@ class StreamJob(BaseJob):
             steps = self._build_steps(app_context=tenant_context) if tenant_context is not None else self._build_steps()
             for step in steps:
                 await step(context)
-            if tenant_context is not None:
-                tenant_context.dirty = True
         except Exception as e:
             await context.add_stream_string(str(e), ChunkEnum.ERROR)
         finally:

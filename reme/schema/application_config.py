@@ -69,7 +69,11 @@ class MultiTenantConfig(BaseModel):
     consolidation_job: str = Field(default="auto_dream", description="Job name the consolidation scheduler invokes")
     consolidation_interval_seconds: float = Field(
         default=3600.0,
-        description="How often the consolidation scheduler scans active tenants for new daily notes",
+        description="How often the consolidation scheduler scans tenants on disk for new daily notes",
+    )
+    consolidation_concurrency: int = Field(
+        default=2,
+        description="Max tenants consolidated (auto_dream) concurrently per scan",
     )
     auth: MultiTenantAuthConfig = Field(default_factory=MultiTenantAuthConfig, description="Boundary identity config")
 

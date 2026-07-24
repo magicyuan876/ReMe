@@ -126,9 +126,6 @@ class TenantContext:
         # Lifecycle bookkeeping owned by TenantManager.
         self.last_used_at: float = 0.0
         self.in_flight: int = 0
-        # Set when the tenant had write activity since the last consolidation; the
-        # ReMe-side consolidation scheduler consolidates dirty tenants and clears it.
-        self.dirty: bool = False
         self.lock: asyncio.Lock = asyncio.Lock()
         self.started_components: list["BaseComponent"] = []
 

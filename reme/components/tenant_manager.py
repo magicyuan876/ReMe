@@ -8,6 +8,7 @@ request re-instantiates and re-loads the tenant's persisted index.
 """
 
 import asyncio
+import os
 import re
 import time
 from pathlib import Path
@@ -179,30 +180,91 @@ class TenantManager:
                     await self._close_tenant(tctx)
 
     async def _consolidation_loop(self) -> None:
-        """Periodically consolidate (auto_dream) tenants that had write activity.
+        """Periodically consolidate (auto_dream) every tenant with new daily content.
 
-        Replaces the disabled ``dream_cron``. Only dirty resident tenants are
-        consolidated; auto_dream's own change detection handles the rest. Runs the
-        job through the shared job registry with the tenant injected, so it reuses the
-        normal acquisition / in-flight path.
+        Replaces the disabled ``dream_cron``. This scans the workspaces on DISK — not
+        the in-memory LRU — so a tenant is consolidated even if it wrote and then got
+        evicted, and the schedule survives restarts. A per-tenant marker file records
+        the last consolidation time; a tenant is "due" when any daily file is newer
+        than its marker. ``auto_dream``'s own catalog does the fine-grained change
+        detection and skips the LLM when nothing actually changed.
         """
         interval = float(self.config.consolidation_interval_seconds)
-        job_name = self.config.consolidation_job
+        # First pass shortly after startup (not a full interval later), so fresh
+        # deployments and restarts build digest promptly instead of after ~1 hour.
+        await asyncio.sleep(min(60.0, interval))
         while not self._stopping:
+            try:
+                await self._consolidate_due_tenants()
+            except Exception as e:  # pragma: no cover - best-effort background
+                self.logger.exception(f"[tenant_manager] consolidation scan failed: {e}")
             await asyncio.sleep(interval)
-            job = self._global.jobs.get(job_name)
-            if job is None:
-                self.logger.warning(f"[tenant_manager] consolidation job {job_name!r} not found; skipping")
-                continue
-            for tctx in list(self._cache.values()):
-                if not tctx.dirty:
-                    continue
+
+    async def _consolidate_due_tenants(self) -> None:
+        """Run auto_dream for every tenant whose daily content changed since last time."""
+        job = self._global.jobs.get(self.config.consolidation_job)
+        if job is None:
+            self.logger.warning(f"[tenant_manager] consolidation job {self.config.consolidation_job!r} not found")
+            return
+        root = Path(self.config.workspaces_root).absolute()
+        if not root.is_dir():
+            return
+        due = [tid for tid in self._list_tenant_ids(root) if self._needs_consolidation(root, tid)]
+        self.logger.info(f"[tenant_manager] consolidation scan: {len(due)} tenant(s) due")
+        if not due:
+            return
+        semaphore = asyncio.Semaphore(max(1, int(self.config.consolidation_concurrency)))
+
+        async def run_one(tenant_id: str) -> None:
+            async with semaphore:
+                if self._stopping:
+                    return
                 try:
-                    await job(**{"__tenant__": tctx.tenant_id})
-                    tctx.dirty = False
-                    self.logger.info(f"[tenant_manager] consolidated tenant={tctx.tenant_id!r}")
+                    await job(**{"__tenant__": tenant_id})
+                    self._touch_marker(root, tenant_id)  # after the run, so it postdates any file it wrote
+                    self.logger.info(f"[tenant_manager] consolidated tenant={tenant_id!r}")
                 except Exception as e:  # pragma: no cover - best-effort background
-                    self.logger.exception(f"[tenant_manager] consolidation failed tenant={tctx.tenant_id!r}: {e}")
+                    self.logger.exception(f"[tenant_manager] consolidation failed tenant={tenant_id!r}: {e}")
+
+        await asyncio.gather(*(run_one(tid) for tid in due))
+
+    def _list_tenant_ids(self, root: Path) -> list[str]:
+        """Tenant subdirectories under workspaces_root whose name is a valid tenant id."""
+        out: list[str] = []
+        try:
+            for entry in os.scandir(root):
+                if entry.is_dir() and self._id_re.match(entry.name):
+                    out.append(entry.name)
+        except OSError as e:
+            self.logger.error(f"[tenant_manager] scandir failed on {root}: {e}")
+        return out
+
+    def _marker_path(self, root: Path, tenant_id: str) -> Path:
+        return root / tenant_id / self._global.app_config.metadata_dir / ".dream_scan"
+
+    def _needs_consolidation(self, root: Path, tenant_id: str) -> bool:
+        """True if any daily file is newer than the tenant's last-consolidation marker."""
+        daily = root / tenant_id / self._global.app_config.daily_dir
+        if not daily.is_dir():
+            return False
+        marker = self._marker_path(root, tenant_id)
+        marker_mtime = marker.stat().st_mtime if marker.exists() else 0.0
+        for dirpath, _dirs, files in os.walk(daily):
+            for name in files:
+                try:
+                    if os.stat(os.path.join(dirpath, name)).st_mtime > marker_mtime:
+                        return True  # early exit: at least one daily file is newer
+                except OSError:
+                    continue
+        return False
+
+    def _touch_marker(self, root: Path, tenant_id: str) -> None:
+        marker = self._marker_path(root, tenant_id)
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        except OSError as e:
+            self.logger.error(f"[tenant_manager] failed to touch marker for {tenant_id!r}: {e}")
 
     # ----- introspection -------------------------------------------------
 
